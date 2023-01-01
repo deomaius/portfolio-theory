@@ -5,18 +5,22 @@ use serde_json::json;
 
 use ndarray::{ Array2, Array3 };
 
+//  Price direction / poolOne / poolTwo
+// > ETH_USD = +TORN = +USDC
+// < ETH_USD = +ETH = +TORN
+ 
 fn parse_json_sources() -> [ Vec<[f64; 2]> ; 5 ]{
-    let source_eth_dai = fs::read_to_string("sources/univ2-eth-dai.json");
+    let source_eth_usdc = fs::read_to_string("sources/univ2-eth-usdc.json");
     let source_eth_torn = fs::read_to_string("sources/univ2-eth-torn.json");
 
-    let data_eth_dai: Value = serde_json::from_str(
-        &source_eth_dai.unwrap()
+    let data_eth_usdc: Value = serde_json::from_str(
+        &source_eth_usdc.unwrap()
     ).unwrap();
     let data_eth_torn: Value = serde_json::from_str(
         &source_eth_torn.unwrap()
     ).unwrap();
 
-    let historic_eth_dai = data_eth_dai["data"]["pairDayDatas"]
+    let historic_eth_usdc = data_eth_usdc["data"]["pairDayDatas"]
         .as_array().unwrap();
     let historic_eth_torn = data_eth_torn["data"]["pairDayDatas"]
         .as_array().unwrap();
@@ -43,7 +47,7 @@ fn parse_json_sources() -> [ Vec<[f64; 2]> ; 5 ]{
             ( e["reserve1"].as_str().unwrap().parse::<f64>().unwrap() /
               e["reserve0"].as_str().unwrap().parse::<f64>().unwrap() )
          ]).collect();
-    let price_eth_dai: Vec<[f64; 2]> = historic_eth_dai.iter()
+    let price_eth_usdc: Vec<[f64; 2]> = historic_eth_usdc.iter()
         .map(|e| [
             e["date"].as_f64().unwrap(),
             ( e["reserve0"].as_str().unwrap().parse::<f64>().unwrap() /
@@ -55,7 +59,7 @@ fn parse_json_sources() -> [ Vec<[f64; 2]> ; 5 ]{
         volumes_torn_eth,
         reserves_torn_eth,
         price_torn_eth,
-        price_eth_dai[0..set_size].to_vec()
+        price_eth_usdc[0..set_size].to_vec()
     ]
 }
 
@@ -124,8 +128,8 @@ fn covariance_matrix(
     variance_matrix[[0, 2, 0]] = covariance_ac;
     variance_matrix[[1, 0, 0]] = covariance_ab;
     variance_matrix[[1, 2, 0]] = f64::clone(&covariance_bc);
-    variance_matrix[[2, 0, 0]] = f64::clone(&covariance_ab);
-    variance_matrix[[2, 1, 0]] = f64::clone(&covariance_ac);
+    variance_matrix[[2, 0, 0]] = f64::clone(&covariance_ac);
+    variance_matrix[[2, 1, 0]] = f64::clone(&covariance_bc);
 
     println!("VAR(x): {:?}", a_variance);
     println!("VAR(y): {:?}", b_variance);
@@ -169,29 +173,6 @@ fn covariance(
     covariance
 }
 
-fn beta_criterion(
-    allocation: f64,
-    covariance: Array2<f64>
-) -> [f64; 2] {
-    let std_a = covariance[[0, 0]].sqrt();
-    let std_b = covariance[[1, 1]].sqrt();
-    let beta_a = covariance[[0, 1]] * (std_a / std_b);
-    let beta_b = covariance[[1, 0]] * (std_b / std_a);
-
-    println!("BETA A: {:?}", beta_a);
-    println!("BETA B: {:?}", beta_b);
-
-    let beta_sum = beta_a + beta_b;
-
-    println!("BETA A MULTIPLIER: {:?}", (beta_a / beta_sum));
-    println!("BETA B MULTIPLIER: {:?}", (beta_b / beta_sum));
-
-    let a_allocation = allocation * (beta_a / beta_sum);
-    let b_allocation = allocation * (beta_b / beta_sum);
-
-    [ a_allocation, b_allocation ]
-}
-
 fn snr_criterion(
     allocation: f64,
     signal_to_noise_ratios: [f64; 3]
@@ -219,7 +200,7 @@ fn coefficient_of_variance(
     a_allocation: f64,
     b_allocation: f64
 ) -> f64 {
-    let expected_return =  a_mean * a_allocation + b_mean * b_allocation;
+    let expected_return =  (a_mean * a_allocation) + (b_mean * b_allocation);
     let std_dev = (a_allocation.powi(2) + b_allocation.powi(2)
         + (2. * (a_allocation * b_allocation
         * covariance_ab))
@@ -252,11 +233,26 @@ fn volatility_and_snr(
     [ volatility_index, snr ]
 }
 
+fn log_returns(
+    index: usize,
+    source_set: Vec<f64> 
+) -> f64 { 
+    let mut previous_returns = 0.;
+
+    if index != 0 
+    {
+        previous_returns = source_set[index - 1];
+    }
+
+    let log_returns =  source_set[index] / previous_returns.ln();
+    log_returns
+}
+
 fn benchmark_strategies(allocation: f64) {
     let [ lp_supply, volumes, liquidity, torn_eth, eth_usd ] = parse_json_sources();
 
     let torn_usd = timeseries_eth_denom_to_usd(eth_usd.clone(), torn_eth);
-    let liquidity_usd = series_volume_usd(eth_usd.clone(), torn_usd.clone(), liquidity );
+    let liquidity_usd = series_volume_usd(eth_usd.clone(), torn_usd.clone(), liquidity);
     let volumes_usd = series_volume_usd(eth_usd.clone(), torn_usd.clone(), volumes);
 
     let isolated_torn_usd: Vec<f64> = torn_usd.iter().map(|e| e[1]).collect();
@@ -265,33 +261,43 @@ fn benchmark_strategies(allocation: f64) {
         .map(|(i, e)| (liquidity_usd[i][0] + liquidity_usd[i][1]) / e[1])
         .collect();
 
+    let log_torn_usd: Vec<f64> = isolated_torn_usd.iter().enumerate()
+        .map(|(i, e)| log_returns(i, isolated_torn_usd.clone()))
+        .collect();
+    let log_eth_usd: Vec<f64> = isolated_eth_usd.iter().enumerate()
+        .map(|(i, e)| log_returns(i, isolated_eth_usd.clone()))
+        .collect();
+    let log_lp_usd: Vec<f64> = isolated_lp_usd.iter().enumerate()
+        .map(|(i, e)| log_returns(i, isolated_lp_usd.clone()))
+        .collect();
+
     let series_set_size = usize::clone(&torn_usd.len()) as f64;
-    let torn_usd_mean = mean(isolated_torn_usd.clone());
-    let eth_usd_mean = mean(isolated_eth_usd.clone());
-    let lp_usd_mean = mean(isolated_lp_usd.clone());
+    let log_torn_usd_mean = mean(log_torn_usd.clone());
+    let log_eth_usd_mean = mean(log_eth_usd.clone());
+    let log_lp_usd_mean = mean(log_lp_usd.clone());
 
     let covariance = covariance_matrix(
-        isolated_eth_usd,
-        isolated_torn_usd,
-        isolated_lp_usd,
-        eth_usd_mean,
-        torn_usd_mean,
-        lp_usd_mean
+        log_eth_usd,
+        log_torn_usd,
+        log_lp_usd,
+        log_eth_usd_mean,
+        log_torn_usd_mean,
+        log_lp_usd_mean
     );
 
     let [ eth_usd_volatility_index, eth_usd_snr ] = volatility_and_snr(
         covariance[[0, 0, 0]],
-        f64::clone(&eth_usd_mean),
+        f64::clone(&log_eth_usd_mean),
         f64::clone(&series_set_size)
     );
     let [ torn_usd_volatility_index, torn_usd_snr ] = volatility_and_snr(
         covariance[[1, 1, 0]],
-        f64::clone(&torn_usd_mean),
+        f64::clone(&log_torn_usd_mean),
         f64::clone(&series_set_size)
     );
     let [ lp_usd_volatility_index, lp_usd_snr ] = volatility_and_snr(
         covariance[[2, 2, 0]],
-        f64::clone(&lp_usd_mean),
+        f64::clone(&log_lp_usd_mean),
         f64::clone(&series_set_size)
     );
 
