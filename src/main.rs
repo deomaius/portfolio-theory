@@ -1,9 +1,11 @@
 use std::fs;
-
-use serde_json::{ Error, Value };
 use serde_json::json;
+use serde_json::{ Value };
 
-use ndarray::{ Array2, Array3 };
+use peroxide::structure::matrix::Matrix;
+use peroxide::numerical::eigen::{ eigen, EigenMethod };
+
+use peroxide::prelude::*;
 
 //  Price direction / poolOne / poolTwo
 // > ETH_USD = +TORN = +USDC
@@ -105,8 +107,8 @@ fn covariance_matrix(
     a_mean: f64,
     b_mean: f64,
     c_mean: f64
-) -> Array3<f64> {
-    let mut variance_matrix = Array3::<f64>::zeros((3, 3, 1));
+) -> Matrix {
+    let mut variance_matrix: Matrix = zeros(3, 3);
     let a_variance = variance(a.clone(), f64::clone(&a_mean));
     let b_variance = variance(b.clone(), f64::clone(&b_mean));
     let c_variance = variance(c.clone(), f64::clone(&c_mean));
@@ -121,15 +123,15 @@ fn covariance_matrix(
         b.clone(), c.clone(), f64::clone(&b_mean), f64::clone(&c_mean)
     );
 
-    variance_matrix[[0, 0, 0]] = a_variance;
-    variance_matrix[[1, 1, 0]] = b_variance;
-    variance_matrix[[2, 2, 0]] = c_variance;
-    variance_matrix[[0, 1, 0]] = covariance_ab;
-    variance_matrix[[0, 2, 0]] = covariance_ac;
-    variance_matrix[[1, 0, 0]] = covariance_ab;
-    variance_matrix[[1, 2, 0]] = f64::clone(&covariance_bc);
-    variance_matrix[[2, 0, 0]] = f64::clone(&covariance_ac);
-    variance_matrix[[2, 1, 0]] = f64::clone(&covariance_bc);
+    variance_matrix[(0, 0)] = a_variance;
+    variance_matrix[(1, 1)] = b_variance;
+    variance_matrix[(2, 2)] = c_variance;
+    variance_matrix[(0, 1)] = covariance_ab;
+    variance_matrix[(0, 2)] = covariance_ac;
+    variance_matrix[(1, 0)] = covariance_ab;
+    variance_matrix[(1, 2)] = f64::clone(&covariance_bc);
+    variance_matrix[(2, 0)] = f64::clone(&covariance_ac);
+    variance_matrix[(2, 1)] = f64::clone(&covariance_bc);
 
     println!("VAR(x): {:?}", a_variance);
     println!("VAR(y): {:?}", b_variance);
@@ -193,21 +195,31 @@ fn snr_criterion(
     ]
 }
 
-fn coefficient_of_variance(
-    a_mean: f64,
-    b_mean: f64,
-    covariance_ab: f64,
-    a_allocation: f64,
-    b_allocation: f64
-) -> f64 {
-    let expected_return =  (a_mean * a_allocation) + (b_mean * b_allocation);
-    let std_dev = (a_allocation.powi(2) + b_allocation.powi(2)
-        + (2. * (a_allocation * b_allocation
-        * covariance_ab))
-    ).sqrt();
-    let coefficient = 100. * (std_dev / expected_return);
+fn beta_criterion(
+    allocation: f64,
+    covariance: Matrix,
+    mean_a: f64,
+    mean_b:f64,
+    mean_c: f64
+) -> [f64; 3] {
+    let [ var_a, var_b, var_c ] = [
+        covariance[(0, 0)], covariance[(1, 1)], covariance[(2, 2)] 
+    ];
+    let [ cov_ab, cov_bc, cov_ca ] = [
+        covariance[(0, 1)], covariance[(1, 2)], covariance[(0, 2)]   
+    ];
+ 
+    let beta_ab = ((cov_ab / var_a) + (cov_ab / var_b )).abs();
+    let beta_bc = ((cov_bc / var_b) + (cov_bc / var_c )).abs();
+    let beta_ca = ((cov_ca / var_a) + (cov_ca/ var_b )).abs();
 
-    coefficient
+    let beta_sum = beta_ab + beta_bc + beta_ca;
+
+    let a_allocation = allocation * ((beta_ab) / beta_sum);
+    let b_allocation = allocation * ((beta_bc) / beta_sum);
+    let z_allocation = allocation * ((beta_ca) / beta_sum);
+
+    [ a_allocation, b_allocation, z_allocation ]
 }
 
 fn mean(a: Vec<f64>) -> f64 {
@@ -224,28 +236,75 @@ fn volatility_and_snr(
     a_mean: f64,
     period: f64
 ) -> [f64; 2] {
-    let rstd = (a_variance.sqrt() / a_mean).abs() * 100.;
-    let volatility_index = (rstd / period) * 100.;
-    let cv = volatility_index /
-        (a_mean * (3_f64).powi(-1)) * 100.;
-    let snr = cv.powi(-1);
+    let std_dev = a_variance.sqrt();
+    let volatility_index = (std_dev * period.sqrt()).abs() * 100.0;
+    let cv = (a_variance.sqrt() / a_mean).abs();
+    let snr = volatility_index.powi(-1);
 
-    [ volatility_index, snr ]
+    [ volatility_index, cv ]
 }
 
 fn log_returns(
     index: usize,
     source_set: Vec<f64> 
 ) -> f64 { 
-    let mut previous_returns = 0.;
+    let mut log_returns = 0.;
 
     if index != 0 
     {
-        previous_returns = source_set[index - 1];
+        let previous_returns = source_set[index - 1];
+
+        if previous_returns != 0.0 
+        {
+            log_returns = (source_set[index] / previous_returns).ln();
+        }
+    } 
+
+    log_returns
+}
+
+fn simulate_lp_pos( 
+    usd_series: Vec<f64>,
+    vol_series: Vec<[f64; 2]>,
+    index: usize,
+) -> [f64 ; 2] {
+    let mut prev_pos_price = 0.0;
+    let pos_price = usd_series[index];
+
+    if index != 0
+    {
+        prev_pos_price = usd_series[index - 1];
     }
 
-    let log_returns =  source_set[index] / previous_returns.ln();
-    log_returns
+    let delta_u = pos_price - prev_pos_price;
+    let delta_d = prev_pos_price - pos_price;
+
+    let mut delta_pos = 0.0;
+    let mut fees_pos = [ 0.0, 0.0 ];
+
+    if delta_u > 0.0 && prev_pos_price != 0.0
+    {
+       delta_pos = delta_u / prev_pos_price; 
+    } 
+    else if delta_d > 0.0 && prev_pos_price != 0.0
+    { 
+       delta_pos = delta_d / prev_pos_price;
+    } 
+
+    let fee_coffeicient = 0.003;
+    let assumption_coefficient = 0.2;
+
+    if delta_pos > 0.049
+    {
+        let vol_a = vol_series[index][0] * assumption_coefficient;
+        let vol_b = vol_series[index][1] * assumption_coefficient;
+
+        fees_pos = [ 
+            vol_a * fee_coffeicient,
+            vol_b * fee_coffeicient
+        ];
+    } 
+    fees_pos
 }
 
 fn benchmark_strategies(allocation: f64) {
@@ -253,22 +312,64 @@ fn benchmark_strategies(allocation: f64) {
 
     let torn_usd = timeseries_eth_denom_to_usd(eth_usd.clone(), torn_eth);
     let liquidity_usd = series_volume_usd(eth_usd.clone(), torn_usd.clone(), liquidity);
-    let volumes_usd = series_volume_usd(eth_usd.clone(), torn_usd.clone(), volumes);
+    let volumes_usd = series_volume_usd(eth_usd.clone(), torn_usd.clone(), volumes.clone());
 
     let isolated_torn_usd: Vec<f64> = torn_usd.iter().map(|e| e[1]).collect();
     let isolated_eth_usd: Vec<f64> = eth_usd.iter().map(|e| e[1]).collect();
-    let isolated_lp_usd: Vec<f64> = lp_supply.iter().enumerate()
-        .map(|(i, e)| (liquidity_usd[i][0] + liquidity_usd[i][1]) / e[1])
-        .collect();
 
-    let log_torn_usd: Vec<f64> = isolated_torn_usd.iter().enumerate()
-        .map(|(i, e)| log_returns(i, isolated_torn_usd.clone()))
-        .collect();
     let log_eth_usd: Vec<f64> = isolated_eth_usd.iter().enumerate()
         .map(|(i, e)| log_returns(i, isolated_eth_usd.clone()))
         .collect();
-    let log_lp_usd: Vec<f64> = isolated_lp_usd.iter().enumerate()
-        .map(|(i, e)| log_returns(i, isolated_lp_usd.clone()))
+    let log_torn_usd: Vec<f64> = isolated_torn_usd.iter().enumerate()
+        .map(|(i, e)| log_returns(i, isolated_torn_usd.clone()))
+        .collect();
+
+    let sim_u_lp_pos: Vec<[f64; 2]> = isolated_eth_usd.clone().iter().enumerate()
+        .map(|(i, _)| 
+            simulate_lp_pos(
+                isolated_eth_usd.clone(),
+                volumes.clone(),
+                i
+            )
+        )
+        .collect();
+    let sim_d_lp_pos: Vec<[f64; 2]> = isolated_torn_usd.clone().iter().enumerate()
+        .map(|(i, _)| 
+            simulate_lp_pos(
+                isolated_torn_usd.clone(),
+                volumes.clone(),
+                i
+            )
+        )
+        .collect();
+
+    let lp_pos: Vec<[f64 ; 2]> = volumes_usd.clone().iter().enumerate()
+        .map(|(i, e)| [ e[0] * 0.003, e[1] * 0.003 ])
+        .collect(); 
+
+    let mut culm_fees = 0.0;
+
+    let total_lp_pos_usd: Vec<f64> = isolated_eth_usd.clone().iter().enumerate()
+        .map(|(i, _)| (
+                isolated_eth_usd[i] * sim_u_lp_pos[i][0] +
+                isolated_torn_usd[i] * sim_u_lp_pos[i][1] +
+                isolated_eth_usd[i] * sim_d_lp_pos[i][0] +
+                isolated_torn_usd[i] * sim_d_lp_pos[i][1] +
+                isolated_eth_usd[i] * lp_pos[i][0] + 
+                isolated_torn_usd[i] * lp_pos[i][1] 
+            )
+        )
+        .collect();
+    let isolated_lp_pos_usd: Vec<f64> = total_lp_pos_usd.clone().iter().enumerate()
+        .into_iter()
+        .scan(0.0, |acc, (i, e)| {
+            *acc += e;
+            Some(*acc)
+        })
+        .collect();
+
+    let log_lp_usd: Vec<f64> = isolated_lp_pos_usd.iter().enumerate()
+        .map(|(i, e)| log_returns(i, isolated_lp_pos_usd.clone()))
         .collect();
 
     let series_set_size = usize::clone(&torn_usd.len()) as f64;
@@ -276,7 +377,7 @@ fn benchmark_strategies(allocation: f64) {
     let log_eth_usd_mean = mean(log_eth_usd.clone());
     let log_lp_usd_mean = mean(log_lp_usd.clone());
 
-    let covariance = covariance_matrix(
+    let covariance_m3 = covariance_matrix(
         log_eth_usd,
         log_torn_usd,
         log_lp_usd,
@@ -285,41 +386,49 @@ fn benchmark_strategies(allocation: f64) {
         log_lp_usd_mean
     );
 
+    let eigen_method = EigenMethod::Jacobi;
+    let covariance_eigenvalue = eigen(&covariance_m3, eigen_method);
+
+    println!("CM: {:?}", covariance_m3);
+
     let [ eth_usd_volatility_index, eth_usd_snr ] = volatility_and_snr(
-        covariance[[0, 0, 0]],
+        covariance_m3[(0, 0)],
         f64::clone(&log_eth_usd_mean),
         f64::clone(&series_set_size)
     );
     let [ torn_usd_volatility_index, torn_usd_snr ] = volatility_and_snr(
-        covariance[[1, 1, 0]],
+        covariance_m3[(1, 1)],
         f64::clone(&log_torn_usd_mean),
         f64::clone(&series_set_size)
     );
     let [ lp_usd_volatility_index, lp_usd_snr ] = volatility_and_snr(
-        covariance[[2, 2, 0]],
+        covariance_m3[(2, 2)],
         f64::clone(&log_lp_usd_mean),
         f64::clone(&series_set_size)
     );
 
-    let [ allocation_a, allocation_b, allocation_c ] = snr_criterion(
+    let [ allocation_a, allocation_b, allocation_c ] = beta_criterion(
         allocation,
-        [ eth_usd_snr, torn_usd_snr, lp_usd_snr ]
+        covariance_m3,
+        f64::clone(&log_eth_usd_mean),
+        f64::clone(&log_torn_usd_mean),
+        f64::clone(&log_lp_usd_mean)
     );
 
     println!("ETH");
     println!("VI: {:?}", eth_usd_volatility_index);
-    println!("CV: {:?} %", eth_usd_snr.powi(-1));
-    println!("S/N: {:?}", eth_usd_snr);
+    println!("CV: {:?} %", eth_usd_snr);
+    println!("S/N: {:?}", eth_usd_volatility_index.powi(-1));
 
     println!("TORN");
     println!("VI: {:?}", torn_usd_volatility_index);
-    println!("CV: {:?} %", torn_usd_snr.powi(-1));
-    println!("S/N: {:?}", torn_usd_snr);
+    println!("CV: {:?} %", torn_usd_snr);
+    println!("S/N: {:?}", torn_usd_volatility_index.powi(-1));
 
     println!("UNIV2-ETH-TORN");
     println!("VI: {:?}", lp_usd_volatility_index);
-    println!("CV: {:?} %", lp_usd_snr.powi(-1));
-    println!("S/N: {:?}", lp_usd_snr);
+    println!("CV: {:?} %", lp_usd_snr);
+    println!("S/N: {:?}", lp_usd_volatility_index.powi(-1));
 
     println!("PORTFOLIO");
     println!("${:?} in ETH", allocation_a);
