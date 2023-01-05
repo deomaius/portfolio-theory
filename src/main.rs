@@ -2,19 +2,13 @@ use std::fs;
 use serde_json::json;
 use serde_json::{ Value };
 
+use peroxide::prelude::*;
 use peroxide::structure::matrix::Matrix;
 use peroxide::numerical::eigen::{ eigen, EigenMethod };
 
-use peroxide::prelude::*;
+use pyo3::prelude::*;
+use peroxide::util::plot::*;
 
-//  Price direction / poolOne / poolTwo
-// > ETH_USD = +TORN = +USDC
-// < ETH_USD = +ETH = +TORN
-
-fn clone_matrix(m3: Matrix) -> Matrix {
-  matrix(m3.data, m3.row, m3.col, m3.shape)
-}
- 
 fn parse_json_sources() -> [ Vec<[f64; 2]> ; 4 ]{
     let source_eth_usdc = fs::read_to_string("sources/univ2-eth-usdc.json");
     let source_eth_torn = fs::read_to_string("sources/univ2-eth-torn.json");
@@ -131,13 +125,6 @@ fn covariance_matrix(
     variance_matrix[(2, 0)] = f64::clone(&covariance_ac);
     variance_matrix[(2, 1)] = f64::clone(&covariance_bc);
 
-    println!("VAR(x): {:?}", a_variance);
-    println!("VAR(y): {:?}", b_variance);
-    println!("VAR(z): {:?}", c_variance);
-    println!("COV(x,y): {:?}", covariance_ab);
-    println!("COV(x,z): {:?}", covariance_ac);
-    println!("COV(y,z): {:?}", covariance_bc);
-
     variance_matrix
 }
 
@@ -246,17 +233,16 @@ fn volatility_and_snr(
     [ volatility_index, snr ]
 }
 
-fn eigenvector_ev(
+fn ev_index(
     covariance: &Matrix,
-    eigenvector: &Matrix,
-    weights: [f64 ; 3]
+    eigenvector: &Matrix
 ) -> [f64 ; 3] {
 
     let mut eigen_weights: Matrix = zeros(3, 1);
 
-    eigen_weights[(0, 0)] = weights[0];
-    eigen_weights[(1, 0)] = weights[1];
-    eigen_weights[(2, 0)] = weights[2];
+    eigen_weights[(0, 0)] = 1.00;
+    eigen_weights[(1, 0)] = 1.00;
+    eigen_weights[(2, 0)] = 1.00;
 
     let eigen_portfolio = eigenvector * &eigen_weights;
     let ev_sum = eigen_portfolio[(0, 0)] 
@@ -333,168 +319,182 @@ fn simulate_lp_pos(
     fees_pos
 }
 
-fn benchmark_strategies(
-    portfolio: [f64; 3 ]
-) {
-    let mut weights = portfolio.clone();
-    let [ volumes, liquidity, torn_eth, eth_usd ] = parse_json_sources();
+fn benchmark_strategies() {
+    let [ volumes, liquidity, torn_eth, eth_usd_series ] = parse_json_sources();
 
-    let torn_usd = timeseries_eth_denom_to_usd(eth_usd.clone(), torn_eth);
-    let isolated_torn_usd: Vec<f64> = torn_usd.iter().map(|e| e[1]).collect();
-    let isolated_eth_usd: Vec<f64> = eth_usd.iter().map(|e| e[1]).collect();
+    let eth_usd: Vec<f64> = eth_usd_series.iter().map(|e| e[1]).collect();
+    let torn_usd: Vec<f64> = timeseries_eth_denom_to_usd(
+        eth_usd_series.clone(), 
+        torn_eth
+    ).iter().map(|e| e[1]).collect();
 
-    let log_eth_usd: Vec<f64> = isolated_eth_usd.iter().enumerate()
-        .map(|(i, e)| log_returns(i, isolated_eth_usd.clone()))
+    let log_eth_usd: Vec<f64> = eth_usd.iter().enumerate()
+        .map(|(i, e)| log_returns(i, eth_usd.clone()))
         .collect();
-    let log_torn_usd: Vec<f64> = isolated_torn_usd.iter().enumerate()
-        .map(|(i, e)| log_returns(i, isolated_torn_usd.clone()))
-        .collect();
-
-    let sim_u_lp_pos: Vec<[f64; 2]> = isolated_eth_usd.clone().iter().enumerate()
-        .map(|(i, _)| 
-            simulate_lp_pos(
-                isolated_eth_usd.clone(),
-                volumes.clone(),
-                i
-            )
-        )
-        .collect();
-    let sim_d_lp_pos: Vec<[f64; 2]> = isolated_torn_usd.clone().iter().enumerate()
-        .map(|(i, _)| 
-            simulate_lp_pos(
-                isolated_torn_usd.clone(),
-                volumes.clone(),
-                i
-            )
-        )
+    let log_torn_usd: Vec<f64> = torn_usd.iter().enumerate()
+        .map(|(i, e)| log_returns(i, torn_usd.clone()))
         .collect();
 
+    let series_set_size = usize::clone(&torn_usd.len());
+
+    let lp_d_pos: Vec<[f64; 2]> = eth_usd.clone().iter().enumerate()
+        .map(|(i, _)| simulate_lp_pos(eth_usd.clone(), volumes.clone(), i ))
+        .collect();
+    let lp_u_pos: Vec<[f64 ; 2]> = eth_usd.clone().iter().enumerate()
+        .map(|(i, _)| simulate_lp_pos(torn_usd.clone(), volumes.clone(), i))
+        .collect();    
     let lp_pos: Vec<[f64 ; 2]> = volumes.clone().iter().enumerate()
         .map(|(i, e)| [ e[0] * 0.003, e[1] * 0.003 ])
         .collect(); 
 
-    let series_set_size = usize::clone(&torn_usd.len());
+    let llp_pos: Vec<f64> = lp_pos.clone().iter().enumerate()
+        .map(|(i, e)| (
+            eth_usd[series_set_size - 1] * e[1] + 
+            torn_usd[series_set_size - 1] * e[0] 
+        )).collect();
 
-    let total_lp_pos_usd: Vec<f64> = isolated_torn_usd.clone().iter().enumerate()
-        .map(|(i, _)| (
-                isolated_eth_usd[series_set_size - 1] * sim_u_lp_pos[i][1] +
-                isolated_torn_usd[series_set_size - 1] * sim_u_lp_pos[i][0] +
-                isolated_eth_usd[series_set_size - 1] * sim_d_lp_pos[i][1] +
-                isolated_torn_usd[series_set_size - 1] * sim_d_lp_pos[i][0] +
-                isolated_eth_usd[series_set_size - 1] * lp_pos[i][1] + 
-                isolated_torn_usd[series_set_size - 1] * lp_pos[i][0] 
-            )
-        )
-        .collect();
-    let isolated_lp_pos_usd: Vec<f64> = total_lp_pos_usd.clone().iter().enumerate()
+    let total_lp_pos: Vec<f64> = lp_pos.clone().iter().enumerate()
+        .map(|(i, e)| (
+            eth_usd[series_set_size - 1] * lp_u_pos[i][1] +
+            torn_usd[series_set_size - 1] * lp_u_pos[i][0] +
+            eth_usd[series_set_size - 1] * lp_d_pos[i][1] +
+            torn_usd[series_set_size - 1] * lp_d_pos[i][0] +
+            eth_usd[series_set_size - 1] * e[1] + 
+            torn_usd[series_set_size - 1] * e[0] 
+        )).collect();
+
+    let lp_pos_usd: Vec<f64> = total_lp_pos.clone().iter().enumerate()
         .into_iter()
         .scan(0.0, |acc, (i, e)| {
             *acc += e;
             Some(*acc)
-        })
+        }).collect();
+
+    let llp_pos_usd: Vec<f64> = llp_pos.clone().iter().enumerate()
+        .into_iter()
+        .scan(0.0, |acc, (i, e)| {
+            *acc += e;
+            Some(*acc)
+        }).collect();
+
+    let log_lp_usd: Vec<f64> = lp_pos_usd.iter().enumerate()
+        .map(|(i, e)| log_returns(i, lp_pos_usd.clone()))
         .collect();
 
-    let log_lp_usd: Vec<f64> = isolated_lp_pos_usd.iter().enumerate()
-        .map(|(i, e)| log_returns(i, isolated_lp_pos_usd.clone()))
-        .collect();
+    let mut series_ev: Vec<[f64; 3]> = vec![];
+    let mut series_cov: Vec<[f64; 3]>= vec![];
+    let mut series_evv: Vec<[f64; 3]>= vec![];
 
-    let log_torn_usd_mean = mean(log_torn_usd.clone());
-    let log_eth_usd_mean = mean(log_eth_usd.clone());
-    let log_lp_usd_mean = mean(log_lp_usd.clone());
+    for n in 2..series_set_size
+    {    
+        let slice_log_torn_usd = log_torn_usd[0..n].to_vec();
+        let slice_log_eth_usd = log_eth_usd[0..n].to_vec();
+        let slice_log_lp_usd = log_lp_usd[0..n].to_vec();
 
-    let covariance_m3 = covariance_matrix(
-        log_eth_usd,
-        log_torn_usd,
-        log_lp_usd,
-        log_eth_usd_mean,
-        log_torn_usd_mean,
-        log_lp_usd_mean
+        let log_torn_usd_mean = mean(slice_log_torn_usd.clone());
+        let log_eth_usd_mean = mean(slice_log_eth_usd.clone());
+        let log_lp_usd_mean = mean(slice_log_lp_usd.clone());
+
+        let covariance_m3 = covariance_matrix(
+            slice_log_eth_usd,
+            slice_log_torn_usd,
+            slice_log_lp_usd,
+            log_eth_usd_mean,
+            log_torn_usd_mean,
+            log_lp_usd_mean
+        );
+
+        let lmda = eigen(&covariance_m3, EigenMethod::Jacobi);
+        let ev_set = ev_index(&covariance_m3, &lmda.eigenvector);
+
+        series_cov.push([ 
+            covariance_m3[(0, 1)], 
+            covariance_m3[(1, 2)], 
+            covariance_m3[(0, 2)]  
+        ]);
+        series_ev.push([
+            lmda.eigenvalue[0],
+            lmda.eigenvalue[1],
+            lmda.eigenvalue[2]
+        ]);
+        series_evv.push(ev_set);
+   }
+
+    pyo3::prepare_freethreaded_python();
+
+    let mut plot_3 = Plot2D::new(); 
+    let mut plot_4 = Plot2D::new();
+    let mut plot_5 = Plot2D::new();
+
+    plot_figure(
+        1,
+        &eth_usd_series,
+        &series_ev,
+        vec![ "TIME (MS)", "EIGENVALUE (EV)" ],
+        vec![ "ETH", "TORN" ],
+        "Line",
+        "./ev-eth-torn-univ2_fold.png",
+        14
     );
 
-    let [ eth_usd_volatility_index, eth_usd_snr ] = volatility_and_snr(
-        covariance_m3[(0, 0)],
-        f64::clone(&log_eth_usd_mean),
-        f64::clone(&(series_set_size as f64))
-    );
-    let [ torn_usd_volatility_index, torn_usd_snr ] = volatility_and_snr(
-        covariance_m3[(1, 1)],
-        f64::clone(&log_torn_usd_mean),
-        f64::clone(&(series_set_size as f64))
-    );
-    let [ lp_usd_volatility_index, lp_usd_snr ] = volatility_and_snr(
-        covariance_m3[(2, 2)],
-        f64::clone(&log_lp_usd_mean),
-        f64::clone(&(series_set_size as f64))
+    plot_figure(
+        0,
+        &eth_usd_series,
+        &series_cov,
+        vec![ "TIME (MS)", "COVARIANCE (CV)" ],
+        vec![ "ETH", "TORN", "UNIV2-2FOLD" ],
+        "Point",
+        "./cov-eth-torn-univ2_fold.png",
+        14
     );
 
-    let [ beta_alloc_a, beta_alloc_b, beta_alloc_c ] = beta_criterion(
-        portfolio.iter().sum(),
-        covariance_m3.clone(),
-        f64::clone(&log_eth_usd_mean),
-        f64::clone(&log_torn_usd_mean),
-        f64::clone(&log_lp_usd_mean)
+} 
+
+fn plot_figure(
+    domain_index: usize,
+    x_domain: &Vec<[f64 ; 2]>,
+    y_domains: &Vec<[f64; 3]>,
+    labels: Vec<&str>,
+    legend: Vec<&str>,
+    fig_type: &str,
+    filepath: &str, 
+    offset: usize
+) { 
+   let mut figure = Plot2D::new(); 
+   let mut figure_plot_type = vec![ Line ];
+
+   if fig_type == "Line" {
+     figure_plot_type = vec![ Line, Line, Line ];
+   } else if fig_type == "Point" {
+     figure_plot_type = vec![ Circle, Circle, Point ];
+   }
+
+    figure.set_domain(
+        x_domain[offset..(x_domain.len() - 2)].iter()
+        .map(|e| e[0]).collect()
     );
 
-    let lmda = eigen(&covariance_m3, EigenMethod::Jacobi);
-    let ev_set = eigenvector_ev(&covariance_m3, &lmda.eigenvector, weights);
+    for i in domain_index..y_domains[0].len()
+    {
+        figure.insert_image(
+            y_domains[offset..y_domains.len()].iter()
+                .map(|e| e[i]).collect()
+        );
+    }
 
-    let exclusion_value = ev_set.iter()
-        .copied().reduce(f64::max).unwrap();
-    let exclusion_index = ev_set.iter()
-        .position(|&e| &e == &exclusion_value).unwrap();
-
-    weights[0] = weights[0] + (weights[exclusion_index] / 2.00);
-    weights[1] = weights[1] + (weights[exclusion_index] / 2.00);
-    weights[2] = weights[2] + (weights[exclusion_index] / 2.00);
-
-    weights[exclusion_index] = 0.00;
-
-    let [ ev_alloc_a, ev_alloc_b, ev_alloc_c ] = criterion(
-        weights,
-        eigenvector_ev(
-            &covariance_m3,
-            &lmda.eigenvector,
-            weights
-        ),
-        exclusion_index
-    );
-
-    println!("ETH");
-    println!("  λ: {:?}", lmda.eigenvalue[0]);
-    println!("  VI: {:?}", eth_usd_volatility_index);
-    println!("  S/N: {:?}", eth_usd_snr);
-    println!("  EV: {:?}", ev_set[0]);
-
-    println!("TORN");
-    println!("  λ: {:?}", lmda.eigenvalue[1]);
-    println!("  VI: {:?}", torn_usd_volatility_index);
-    println!("  S/N: {:?}", torn_usd_snr);
-    println!("  EV: {:?}", ev_set[1]);
-
-    println!("UNIV2-ETH-TORN");
-    println!("  λ: {:?}", lmda.eigenvalue[2]);
-    println!("  VI: {:?}", lp_usd_volatility_index);
-    println!("  S/N: {:?}", lp_usd_snr);
-    println!("  EV: {:?}", ev_set[2]);
-
-    println!("PORTFOLIO THEORY");
-    println!("BETA");    
-    println!("  ${:?} in ETH", beta_alloc_a);
-    println!("  ${:?} in TORN", beta_alloc_b);
-    println!("  ${:?} in UNIV2-ETH-TORN", beta_alloc_c);
-    println!("MAX EV");    
-    println!("  ${:?} in ETH", ev_alloc_a);
-    println!("  ${:?} in TORN", ev_alloc_b);
-    println!("  ${:?} in UNIV2-ETH-TORN", ev_alloc_c);
+    figure
+    .set_title("")
+    .set_legend(legend)
+    .set_fig_size((10, 6))
+    .set_marker(figure_plot_type)
+    .set_dpi(300)
+    .set_path(filepath)
+    .set_ylabel(labels[1])
+    .set_xlabel(labels[0])
+    .savefig();
 }
 
 #[test]
-fn check_conditioning() {
-    benchmark_strategies(
-        [  
-            350000.00,
-            100000.00,
-            550000.00
-        ]
-    )
+fn main() {
+    benchmark_strategies()
 }
