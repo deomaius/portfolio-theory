@@ -188,15 +188,12 @@ fn beta_criterion(
 }
 
 fn criterion(
-    weights: [f64 ; 3],
+    total_allocation: f64,
     ev_set: [f64 ; 3],
     exclusion_index: usize
 ) -> [f64 ; 3] {
     let mut ev_select = ev_set.clone();
 
-    ev_select[exclusion_index] = 0.00;
-
-    let total_allocation: f64 = weights.iter().sum();
     let sum_of_ratios: f64 = ev_select.iter().sum();
     let allocation_a = total_allocation * (ev_select[0] / sum_of_ratios);
     let allocation_b = total_allocation * (ev_select[1] / sum_of_ratios);
@@ -235,7 +232,7 @@ fn volatility_and_snr(
 
 fn ev_index(
     covariance: &Matrix,
-    eigenvector: &Matrix
+    eigenvector: &Matrix,
 ) -> [f64 ; 3] {
 
     let mut eigen_weights: Matrix = zeros(3, 1);
@@ -245,7 +242,7 @@ fn ev_index(
     eigen_weights[(2, 0)] = 1.00;
 
     let eigen_portfolio = eigenvector * &eigen_weights;
-    let ev_sum = eigen_portfolio[(0, 0)] 
+    let ev_sum = eigen_portfolio[(0, 0)]
         + eigen_portfolio[(1, 0)] + 
         eigen_portfolio[(2, 0)];
 
@@ -294,11 +291,11 @@ fn simulate_lp_pos(
     let mut delta_pos = 0.0;
     let mut fees_pos = [ 0.0, 0.0 ];
 
-    if delta_u > 0.0 && prev_pos_price != 0.0
+    if delta_u > 0.0 
     {
        delta_pos = delta_u / prev_pos_price; 
     } 
-    else if delta_d > 0.0 && prev_pos_price != 0.0
+    else if delta_d > 0.0 
     { 
        delta_pos = delta_d / prev_pos_price;
     } 
@@ -319,10 +316,15 @@ fn simulate_lp_pos(
     fees_pos
 }
 
-fn benchmark_strategies() {
+fn benchmark_strategy(strategy_allocation: f64) {
     let [ volumes, liquidity, torn_eth, eth_usd_series ] = parse_json_sources();
 
     let eth_usd: Vec<f64> = eth_usd_series.iter().map(|e| e[1]).collect();
+    let volumes_usd = series_volume_usd(
+        eth_usd_series.clone(), 
+        Vec::clone(&torn_eth), 
+        volumes.clone()
+    );
     let torn_usd: Vec<f64> = timeseries_eth_denom_to_usd(
         eth_usd_series.clone(), 
         torn_eth
@@ -420,33 +422,163 @@ fn benchmark_strategies() {
         series_evv.push(ev_set);
    }
 
-    pyo3::prepare_freethreaded_python();
-
-    let mut plot_3 = Plot2D::new(); 
-    let mut plot_4 = Plot2D::new();
-    let mut plot_5 = Plot2D::new();
-
     plot_figure(
         1,
         &eth_usd_series,
         &series_ev,
         vec![ "TIME (MS)", "EIGENVALUE (EV)" ],
-        vec![ "ETH", "TORN" ],
+        vec![ "", "TORN", "UNIV2-2FOLD" ],
         "Line",
         "./ev-eth-torn-univ2_fold.png",
-        14
+        14,
+        3
     );
 
     plot_figure(
         0,
         &eth_usd_series,
         &series_cov,
-        vec![ "TIME (MS)", "COVARIANCE (CV)" ],
-        vec![ "ETH", "TORN", "UNIV2-2FOLD" ],
+        vec![ "TIME (MS)", "COVARIANCE (CV)", "" ],
+        vec![ "(ETH, TORN)", "(TORN, UNIV2-2FOLD)", "(UNIV2-2FOLD, ETH)" ],
         "Point",
         "./cov-eth-torn-univ2_fold.png",
-        14
+        18,
+        3
     );
+
+    let lp_series: Vec<[f64; 3]> = lp_pos_usd.clone().iter().enumerate()
+        .map(|(i, e)| [ 
+            f64::clone(&volumes_usd[i][1]) * (-1.00),
+            f64::clone(&llp_pos_usd[i]), 
+            f64::clone(&lp_pos_usd[i]), 
+        ])
+        .collect();
+
+    plot_figure(
+        1,
+        &eth_usd_series,
+        &lp_series,
+        vec![ "TIME (MS)", "VALUE (USD)" ],
+        vec![ "", "UNIV2-ETH-TORN", "UNIV2-2FOLD" ],
+        "Line",
+        "./culm-fees_univ2-eth-torn_2fold.png",
+        0,
+        3
+    );
+
+    let evv_series: Vec<[f64; 3]> = series_evv.clone().iter().enumerate()
+        .map(|(i, e)| [ 
+            e[0] + 1.00,
+            e[1] - 1.00,  
+            e[2] 
+        ])
+        .collect();
+
+    plot_figure(
+        0,
+        &eth_usd_series,
+        &evv_series,
+        vec![ "TIME(MS)", "EIGENVECTOR (EVV)" ],
+        vec![ "ETH", "TORN", "UNIV2-2FOLD" ],
+        "Line",
+        "./evv-eth-torn-univ2_2fold.png",
+        100,
+        3
+    );
+
+    let evv_price_series: Vec<[f64; 3]> = series_evv.clone().iter().enumerate()
+        .map(|(i, e)| [ 
+            eth_usd[i] / 10.0,
+            torn_usd[i],  
+            series_evv[i][2 ] * -150.00 
+        ])
+    .collect();
+
+    plot_figure(
+        0,
+        &eth_usd_series,
+        &evv_price_series,
+        vec![ "TIME(MS)", "VALUE (USD)" ],
+        vec![ "ETH", "TORN", "UNIV2-2FOLD EV" ],
+        "Line",
+        "./eth-torn-usd-univ2_2fold-evv.png",
+        0,
+        3
+    );
+
+    let fees_volume_series: Vec<[f64; 3]> = series_evv.clone().iter().enumerate()
+        .map(|(i, e)| [ 
+            series_evv[i][2] * - 100000000.0, 
+            series_evv[i][2] * - 100000000.0, 
+            volumes_usd[i + 2][1] + volumes_usd[i + 2][0],  
+        ])
+    .collect();
+
+    plot_figure(
+        1,
+        &eth_usd_series,
+        &fees_volume_series,
+        vec![ "TIME(MS)", "VALUE (USD)" ],
+        vec![ "UNIV2-2FOLD EVV", "UNIV2-2FOLD EVV", "VOLUME" ],
+        "Line",
+        "./eth-torn-usd-univ2_2fold-vol-fees.png",
+        0,
+        3
+    );
+
+    let eth_mean = mean(log_eth_usd.clone());
+    let torn_mean = mean(log_torn_usd.clone());
+    let lp_mean = mean(log_lp_usd.clone());
+
+    let eth_variance = variance(log_eth_usd.clone(), eth_mean);
+    let torn_variance = variance(log_torn_usd.clone(), torn_mean);
+    let lp_variance = variance(log_lp_usd.clone(), lp_mean);
+
+    let [ eth_volatility_index, eth_snr ] = volatility_and_snr(
+        f64::clone(&eth_variance),
+        f64::clone(&eth_mean),
+        f64::clone(&(series_set_size as f64))
+    );
+    let [ torn_volatility_index, torn_snr ] = volatility_and_snr(
+        f64::clone(&torn_variance),
+        f64::clone(&torn_mean),
+        f64::clone(&(series_set_size as f64))
+    );
+    let [ lp_volatility_index, lp_snr ] = volatility_and_snr(
+        f64::clone(&lp_variance),
+        f64::clone(&lp_mean),
+        f64::clone(&(series_set_size as f64))
+    );
+
+    println!("ETH");
+    println!("  λ: {:?}", series_ev[series_ev.len() - 1][0]);
+    println!("  VI: {:?}", eth_volatility_index);
+    println!("  S/N: {:?}", eth_snr);
+    println!("  EVV: {:?}", series_evv[series_evv.len() - 1][0]);
+
+    println!("TORN");
+    println!("  λ: {:?}", series_ev[series_ev.len() - 1][1]);
+    println!("  VI: {:?}", torn_volatility_index);
+    println!("  S/N: {:?}", torn_snr);
+    println!("  EVV: {:?}", series_evv[series_evv.len() - 1][1]);
+
+    println!("UNIV2-2FOLD");
+    println!("  λ: {:?}", series_ev[series_ev.len() - 1][2]);
+    println!("  VI: {:?}", lp_volatility_index);
+    println!("  S/N: {:?}", lp_snr);
+    println!("  EVV: {:?}", series_evv[series_evv.len() - 1][2]);
+
+    let [ ev_alloc_a, ev_alloc_b, ev_alloc_c ] = criterion(
+        strategy_allocation,
+        series_evv[series_evv.len() - 1],
+        0
+    );
+
+    println!("ALLOCATION");
+    println!("EVV");    
+    println!("  ${:?} in ETH", ev_alloc_a);
+    println!("  ${:?} in TORN", ev_alloc_b);
+    println!("  ${:?} in UNIV2-ETH-TORN", ev_alloc_c);
 
 } 
 
@@ -458,35 +590,44 @@ fn plot_figure(
     legend: Vec<&str>,
     fig_type: &str,
     filepath: &str, 
-    offset: usize
+    offset: usize,
+    domain_size: usize
 ) { 
    let mut figure = Plot2D::new(); 
-   let mut figure_plot_type = vec![ Line ];
+   let mut figure_plot_type = vec![ Line, Line, Line ];
 
-   if fig_type == "Line" {
-     figure_plot_type = vec![ Line, Line, Line ];
-   } else if fig_type == "Point" {
-     figure_plot_type = vec![ Circle, Circle, Point ];
-   }
+    if fig_type == "Point" {
+     figure_plot_type = vec![ Point, Point, Point ];
+   } 
 
     figure.set_domain(
-        x_domain[offset..(x_domain.len() - 2)].iter()
+        x_domain[offset..y_domains.len()].iter()
         .map(|e| e[0]).collect()
     );
 
-    for i in domain_index..y_domains[0].len()
+    for i in domain_index..domain_size 
     {
         figure.insert_image(
             y_domains[offset..y_domains.len()].iter()
-                .map(|e| e[i]).collect()
+            .map(|e| e[i]).collect()
         );
     }
 
     figure
     .set_title("")
-    .set_legend(legend)
     .set_fig_size((10, 6))
-    .set_marker(figure_plot_type)
+    .set_marker(
+        Vec::clone(
+            &[ &figure_plot_type[domain_index..domain_size] ]
+            .concat().to_vec()
+        )
+    )
+    .set_legend(
+        Vec::clone(
+            &[ &legend[domain_index..domain_size] ]
+            .concat().to_vec()
+        )
+    )
     .set_dpi(300)
     .set_path(filepath)
     .set_ylabel(labels[1])
@@ -496,5 +637,7 @@ fn plot_figure(
 
 #[test]
 fn main() {
-    benchmark_strategies()
+    pyo3::prepare_freethreaded_python();
+ 
+    benchmark_strategy(500000.00)
 }
