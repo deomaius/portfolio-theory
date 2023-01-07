@@ -274,7 +274,6 @@ fn log_returns(
 
 fn simulate_lp_pos( 
     usd_series: Vec<f64>,
-    vol_series: Vec<[f64; 2]>,
     index: usize,
 ) -> [f64 ; 2] {
     let mut prev_pos_price = 0.0;
@@ -300,19 +299,11 @@ fn simulate_lp_pos(
        delta_pos = delta_d / prev_pos_price;
     } 
 
-    let fee_coffeicient = 0.003;
-    let assumption_coefficient = 0.25;
-
     if delta_pos > 0.0199
     {
-        let vol_a = vol_series[index][0] * assumption_coefficient;
-        let vol_b = vol_series[index][1] * assumption_coefficient;
-
-        fees_pos = [ 
-            vol_a * fee_coffeicient,
-            vol_b * fee_coffeicient
-        ];
+        fees_pos = [ 1.00, 1.00 ];
     } 
+
     fees_pos
 }
 
@@ -340,10 +331,10 @@ fn benchmark_strategy(strategy_allocation: f64) {
     let series_set_size = usize::clone(&torn_usd.len());
 
     let lp_d_pos: Vec<[f64; 2]> = eth_usd.clone().iter().enumerate()
-        .map(|(i, _)| simulate_lp_pos(eth_usd.clone(), volumes.clone(), i ))
+        .map(|(i, _)| simulate_lp_pos(eth_usd.clone(), i ))
         .collect();
     let lp_u_pos: Vec<[f64 ; 2]> = eth_usd.clone().iter().enumerate()
-        .map(|(i, _)| simulate_lp_pos(torn_usd.clone(), volumes.clone(), i))
+        .map(|(i, _)| simulate_lp_pos(torn_usd.clone(), i))
         .collect();    
     let lp_pos: Vec<[f64 ; 2]> = volumes.clone().iter().enumerate()
         .map(|(i, e)| [ e[0] * 0.003, e[1] * 0.003 ])
@@ -355,15 +346,44 @@ fn benchmark_strategy(strategy_allocation: f64) {
             torn_usd[series_set_size - 1] * e[0] 
         )).collect();
 
-    let total_lp_pos: Vec<f64> = lp_pos.clone().iter().enumerate()
-        .map(|(i, e)| (
-            eth_usd[series_set_size - 1] * lp_u_pos[i][1] +
-            torn_usd[series_set_size - 1] * lp_u_pos[i][0] +
-            eth_usd[series_set_size - 1] * lp_d_pos[i][1] +
-            torn_usd[series_set_size - 1] * lp_d_pos[i][0] +
-            eth_usd[series_set_size - 1] * e[1] + 
-            torn_usd[series_set_size - 1] * e[0] 
-        )).collect();
+    let total_lp_pos: Vec<f64> = volumes.clone().iter().enumerate()
+        .map(|(i, e)| {
+            let vol_assumption = 0.25;
+            let fee_assumption = 0.003;
+
+            let llp_eth_fees =  (eth_usd[i] * e[1]) * vol_assumption * fee_assumption;
+            let llp_torn_fees = (torn_usd[i] * e[0]) * vol_assumption * fee_assumption;
+
+            let lp_fees = llp_eth_fees + llp_torn_fees;
+
+            let mut lp_u_dai_fees = lp_fees / 4.00;
+            let mut lp_u_eth_fees = (lp_fees / 4.00) / eth_usd[i];
+            let mut lp_u_torn_fees = (lp_fees / 2.00) / torn_usd[i];
+
+            let mut lp_d_dai_fees = lp_fees / 4.00;
+            let mut lp_d_eth_fees = (lp_fees / 4.00) / eth_usd[i];
+            let mut lp_d_torn_fees = (lp_fees / 2.00) / torn_usd[i];
+
+            if lp_d_pos[i] == [ 0.0, 0.0 ] 
+            {
+                lp_d_torn_fees = 0.00;
+                lp_d_eth_fees = 0.00;
+                lp_d_dai_fees = 0.00;
+            } 
+            if lp_u_pos[i] == [ 0.0, 0.0 ] 
+            {
+                lp_u_torn_fees = 0.00;
+                lp_u_eth_fees = 0.00;
+                lp_u_dai_fees = 0.00;
+            }
+
+            return (
+                ((lp_d_torn_fees + lp_u_torn_fees )  * torn_usd[series_set_size - 1]) 
+                + ((lp_d_eth_fees + lp_u_eth_fees ) * eth_usd[series_set_size - 1]) 
+                +  lp_d_dai_fees + lp_u_dai_fees
+                +  llp_pos[i]
+            );
+        }).collect();
 
     let lp_pos_usd: Vec<f64> = total_lp_pos.clone().iter().enumerate()
         .into_iter()
